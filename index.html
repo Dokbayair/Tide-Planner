@@ -150,6 +150,24 @@
   .plan-leg b { color: var(--ink); }
   .plan-arrow { color: var(--muted); }
   .plan-meta { font-size: 12px; color: var(--muted); margin-left: auto; }
+  .fleet-input-table { border-collapse: collapse; font-size: 14px; margin-bottom: 6px; }
+  .fleet-input-table th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.3px; padding: 4px 12px; }
+  .fleet-input-table td { padding: 6px 12px; }
+  .fleet-input-table input {
+    width: 70px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px;
+    font: inherit; text-align: center; font-size: 16px;
+  }
+  .cascade-block {
+    margin-top: 10px; padding: 10px 12px;
+    background: #fafbfc; border: 1px solid var(--border); border-radius: 8px;
+  }
+  .cascade-block h4 { margin: 0 0 8px 0; font-size: 14px; }
+  .cascade-table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+  .cascade-table th, .cascade-table td { padding: 5px 8px; text-align: left; border-bottom: 1px solid var(--border); }
+  .cascade-table th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.3px; }
+  .cascade-table tr:last-child td { border-bottom: 0; }
+  .cascade-table .time-cell { font-weight: 600; color: var(--accent); }
+  .cascade-warn { color: var(--warn); font-weight: 500; font-size: 13px; margin-top: 6px; }
   details.settings {
     margin-top: 24px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
     padding: 14px 18px;
@@ -214,6 +232,23 @@
     <div id="plansList"></div>
   </div>
 
+  <div class="plans" id="fleet" style="display:none">
+    <h3>Fleet planning — book trips by block</h3>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:10px;">Enter how many planes you're flying in each block (all go to one destination together). For each block, the app lists every feasible destination with its must-depart deadline. The right-most column shows whether the same destination is also feasible in the opposite block — useful if bears are good and you want to return in the afternoon.</div>
+    <table class="fleet-input-table">
+      <thead><tr><th></th><th>Classic (3 hr)</th><th>Short (1 hr)</th></tr></thead>
+      <tbody>
+        <tr><td><b>AM</b></td>
+            <td><input type="number" id="amClassic" min="0" max="20" value="0"></td>
+            <td><input type="number" id="amShort"   min="0" max="20" value="0"></td></tr>
+        <tr><td><b>PM</b></td>
+            <td><input type="number" id="pmClassic" min="0" max="20" value="0"></td>
+            <td><input type="number" id="pmShort"   min="0" max="20" value="0"></td></tr>
+      </tbody>
+    </table>
+    <div id="fleetCascades" style="margin-top:14px;"></div>
+  </div>
+
   <div class="results" id="results"></div>
 
   <details class="settings">
@@ -227,6 +262,10 @@
     <p class="help-text">
       Classic trip ground time: <input type="number" id="classicGround" step="0.25" min="0.5" max="6" style="width: 80px"> hours &nbsp;
       Short trip ground time: <input type="number" id="shortGround" step="0.25" min="0.25" max="3" style="width: 80px"> hours
+    </p>
+    <p class="help-text">
+      Normal min turnaround between trips: <input type="number" id="normalTurn" min="0" max="240" style="width: 80px"> min &nbsp;
+      Quick-turn min (Double Day): <input type="number" id="quickTurn" min="0" max="240" style="width: 80px"> min
     </p>
     <p class="help-text">
       <button class="secondary" id="resetSettings">Reset to defaults</button>
@@ -274,7 +313,12 @@ const DEFAULT_RULES = {
   earliest_departure: '06:30',
   latest_arrival: '22:00',
   classic_ground_hours: 3,
-  short_ground_hours: 1
+  short_ground_hours: 1,
+  // Turnaround between two trips on the same day:
+  //   normal_turnaround_min = preferred buffer (60 default)
+  //   quick_turnaround_min  = absolute floor (30); pairs 30–59 min tagged as "Quick Turn Double Day"
+  normal_turnaround_min: 60,
+  quick_turnaround_min: 30
 };
 
 // ============================================================
@@ -609,9 +653,10 @@ function renderResults(dateStr, tripFilter, effectiveRules) {
       body += '<div style="color:var(--muted);font-style:italic;">No acceptable tide windows today.</div>';
     } else if (dest.transport_only) {
       // McNeil-style: clip the tide window(s) to operating hours [opStart, opEnd] → go/no-go
+      const inWinLabel = (dest.tide_op === 'min') ? 'Tide stays ≥' : 'Tide stays ≤';
       body += '<table class="window-table"><thead><tr><th>Operating window (clipped to ' +
               effectiveRules.earliest_departure + '&ndash;' + effectiveRules.latest_arrival + ')</th><th>Status</th>' +
-              '<th>' + (dest.tide_op === 'min' ? 'Best water' : 'Peak tide') + '</th></tr></thead><tbody>';
+              '<th title="The most extreme tide reached during the acceptable window — NOT the day\'s overall high or low. See banner above for actual highs/lows.">' + inWinLabel + '</th></tr></thead><tbody>';
       let anyGo = false;
       out.dayWindows.forEach(w => {
         const clippedStart = new Date(Math.max(w.start.getTime(), opStart.getTime()));
@@ -619,29 +664,32 @@ function renderResults(dateStr, tripFilter, effectiveRules) {
         const clippedLenMin = (clippedEnd - clippedStart) / 60000;
         const isGo = clippedLenMin > 0;
         if (isGo) anyGo = true;
-        const label = (dest.tide_op === 'min') ? 'high ' : 'peak ';
         const statusBadge = isGo
           ? '<span class="badge badge-go">GO</span> ' + Math.round(clippedLenMin) + ' min'
           : '<span class="badge badge-no">NO-GO</span> outside ' + effectiveRules.earliest_departure + '&ndash;' + effectiveRules.latest_arrival;
         const range = isGo ? fmtTime(clippedStart) + ' &ndash; ' + fmtTime(clippedEnd)
                            : fmtTime(w.start) + ' &ndash; ' + fmtTime(w.end) + ' <small>(outside hours)</small>';
+        const sym = (dest.tide_op === 'min') ? '≥ ' : '≤ ';
         body += '<tr><td>' + range + '</td><td>' + statusBadge + '</td>' +
-                '<td>' + label + w.peakInside.toFixed(1) + ' ft</td></tr>';
+                '<td>' + sym + w.peakInside.toFixed(1) + ' ft</td></tr>';
       });
       if (!anyGo && out.dayWindows.length > 0) {
         body += '<tr><td colspan="3" style="color:var(--muted);font-style:italic;">No window falls within operating hours today.</td></tr>';
       }
       body += '</tbody></table>';
     } else {
-      body += '<table class="window-table"><thead><tr><th>Tide window (at beach)</th><th>Peak tide</th>';
+      const inWinLabel = (dest.tide_op === 'max') ? 'Tide stays ≤' : 'Tide stays ≥';
+      body += '<table class="window-table"><thead><tr>' +
+              '<th>Beach window (tide OK to land)</th>' +
+              '<th title="The maximum tide reached during the acceptable window — i.e., the tide is at or below this number for the whole window. NOT the day\'s overall high tide. See the banner above for the day\'s actual highs and lows.">' + inWinLabel + '</th>';
       if (tripFilter !== 'short') body += '<th>Classic Homer dep.</th>';
       if (tripFilter !== 'classic') body += '<th>Short Homer dep.</th>';
       body += '</tr></thead><tbody>';
       out.results.forEach(r => {
         body += '<tr>';
         body += '<td>' + fmtTime(r.window.start) + ' &ndash; ' + fmtTime(r.window.end) + '</td>';
-        const peakLabel = (dest.tide_op === 'max') ? 'peak ' : 'trough ';
-        body += '<td>' + peakLabel + r.window.peakInside.toFixed(1) + ' ft</td>';
+        const sym = (dest.tide_op === 'max') ? '≤ ' : '≥ ';
+        body += '<td>' + sym + r.window.peakInside.toFixed(1) + ' ft</td>';
         if (tripFilter !== 'short') body += '<td>' + tripCell(r.classic) + '</td>';
         if (tripFilter !== 'classic') body += '<td>' + tripCell(r.short) + '</td>';
         body += '</tr>';
@@ -690,6 +738,8 @@ function renderSettings() {
   document.getElementById('latestArrival').value = SETTINGS.rules.latest_arrival;
   document.getElementById('classicGround').value = SETTINGS.rules.classic_ground_hours;
   document.getElementById('shortGround').value = SETTINGS.rules.short_ground_hours;
+  document.getElementById('normalTurn').value = SETTINGS.rules.normal_turnaround_min;
+  document.getElementById('quickTurn').value = SETTINGS.rules.quick_turnaround_min;
 }
 
 // ============================================================
@@ -712,6 +762,11 @@ function renderAvailability() {
 // ============================================================
 function collectTripCandidates(dateStr, effectiveRules) {
   // Returns array of {dest, label, kind: 'classic'|'short', dep, latestDep, return, latestReturn, flexibilityMin, window}
+  // For windows that span midday (Homer dep range crosses 12:00), emit TWO candidates:
+  // one for AM (dep ≤ 12:00) and one for PM (dep ≥ 12:00). This handles wide windows where
+  // both an AM and PM trip to the same destination are individually feasible.
+  const baseDate = new Date(dateStr + 'T00:00:00');
+  const midday = new Date(baseDate); midday.setHours(12, 0, 0, 0);
   const candidates = [];
   SETTINGS.destinations.forEach(dest => {
     if (!dest.enabled || dest.transport_only) return;
@@ -722,47 +777,77 @@ function collectTripCandidates(dateStr, effectiveRules) {
         if (!t.feasible) return;
         const ground = (kind === 'classic') ? effectiveRules.classic_ground_hours : effectiveRules.short_ground_hours;
         const rtMs = 2 * dest.flight_min * 60000 + ground * 3600000;
-        candidates.push({
-          dest, kind,
-          dep: t.earliestHomerDep,
-          latestDep: t.latestHomerDep,
-          ret: t.earliestReturn,
-          latestRet: t.latestReturn,
-          rtMs, ground,
-          window: r.window,
-          flexibilityMin: t.flexibilityMin
-        });
+        const baseCand = {
+          dest, kind, rtMs, ground, window: r.window
+        };
+        // Split helper
+        const emit = (earliestDep, latestDep) => {
+          if (latestDep <= earliestDep) return;
+          candidates.push(Object.assign({}, baseCand, {
+            dep: earliestDep,
+            latestDep: latestDep,
+            ret: new Date(earliestDep.getTime() + rtMs),
+            latestRet: new Date(latestDep.getTime() + rtMs),
+            flexibilityMin: (latestDep - earliestDep) / 60000
+          }));
+        };
+        const startsBeforeNoon = t.earliestHomerDep < midday;
+        const endsAfterNoon = t.latestHomerDep >= midday;
+        if (startsBeforeNoon && endsAfterNoon) {
+          // Spans midday — split into AM and PM portions
+          emit(t.earliestHomerDep, midday);
+          emit(midday, t.latestHomerDep);
+        } else {
+          emit(t.earliestHomerDep, t.latestHomerDep);
+        }
       });
     });
   });
   return candidates;
 }
 
-function findDoubles(candidates, latestArr) {
-  // For each ordered pair (A, B): if B can depart after A returns and B still meets latest arrival
+function findDoubles(candidates, latestArr, effectiveRules) {
+  // For each ordered pair (A, B): keep two flavors when possible —
+  //   "normal":     trip B departs at least normal_turnaround_min after A returns
+  //   "quick-turn": trip B departs 30-59 min after A returns (flagged for the pilot)
+  // Pairs requiring <30 min are excluded entirely.
+  const normalGap = effectiveRules.normal_turnaround_min * 60000;
+  const quickGap = effectiveRules.quick_turnaround_min * 60000;
   const doubles = [];
   for (let i = 0; i < candidates.length; i++) {
     for (let j = 0; j < candidates.length; j++) {
       if (i === j) continue;
       const a = candidates[i], b = candidates[j];
-      // a is morning trip; require a.dep < b.dep
-      // Compute earliest possible dep for B given A
-      const minBDep = Math.max(b.dep.getTime(), a.ret.getTime());
-      if (minBDep > b.latestDep.getTime()) continue;
-      // B return = minBDep + b.rtMs
-      const bRet = minBDep + b.rtMs;
-      if (bRet > latestArr.getTime()) continue;
-      // Make sure A came first
-      if (a.dep.getTime() >= b.dep.getTime() && a.dep.getTime() >= minBDep) continue;
-      const turnaroundMin = (minBDep - a.ret.getTime()) / 60000;
-      doubles.push({
-        a,
-        b: Object.assign({}, b, { dep: new Date(minBDep), ret: new Date(bRet) }),
-        turnaroundMin
-      });
+      // Require A to start before B (A is morning leg)
+      if (a.dep.getTime() >= b.dep.getTime() && a.dep.getTime() >= a.ret.getTime()) continue;
+      const aRet = a.ret.getTime();
+      // Try normal-turnaround pairing first
+      const tryGap = (gapMs, label) => {
+        const minBDep = Math.max(b.dep.getTime(), aRet + gapMs);
+        if (minBDep > b.latestDep.getTime()) return null;
+        const bRet = minBDep + b.rtMs;
+        if (bRet > latestArr.getTime()) return null;
+        const turnaroundMin = (minBDep - aRet) / 60000;
+        return {
+          a,
+          b: Object.assign({}, b, { dep: new Date(minBDep), ret: new Date(bRet) }),
+          turnaroundMin,
+          label
+        };
+      };
+      const normal = tryGap(normalGap, 'normal');
+      const quick  = tryGap(quickGap, 'quick');
+      if (normal && normal.turnaroundMin >= effectiveRules.normal_turnaround_min) {
+        doubles.push(normal);
+      } else if (quick && quick.turnaroundMin >= effectiveRules.quick_turnaround_min) {
+        // Normal didn't fit but quick does — Quick Turn Double Day
+        quick.label = 'quick';
+        doubles.push(quick);
+      }
+      // pairs needing <30 min are not pushed at all
     }
   }
-  // Dedupe by canonical signature (dest+kind+windowStart)
+  // Dedupe by signature (dest+kind+windowStart pair) — keep the first (normal preferred)
   const seen = new Set();
   const unique = [];
   for (const d of doubles) {
@@ -776,17 +861,18 @@ function findDoubles(candidates, latestArr) {
 }
 
 function rankDoubles(doubles) {
-  // Score: prefer pairs with reasonable turnaround (60-180 min) and both classic
   doubles.forEach(d => {
     let s = 0;
-    if (d.a.kind === 'classic' && d.b.kind === 'classic') s += 100; // double classic is preferred
-    else if (d.a.kind === 'classic' || d.b.kind === 'classic') s += 60; // mixed
-    else s += 30; // double short
-    // Turnaround
-    if (d.turnaroundMin >= 60 && d.turnaroundMin <= 180) s += 50;
-    else if (d.turnaroundMin < 60) s += 20; // quick turn — still valuable but stressful
-    else s += 10; // long gap — wasteful
-    // Same destination twice: bonus (common pattern when alternatives unavailable)
+    if (d.a.kind === 'classic' && d.b.kind === 'classic') s += 100;
+    else if (d.a.kind === 'classic' || d.b.kind === 'classic') s += 60;
+    else s += 30;
+    if (d.label === 'normal') {
+      // Comfortable turnaround
+      if (d.turnaroundMin <= 180) s += 50;
+      else s += 10; // long idle gap
+    } else if (d.label === 'quick') {
+      s += 25; // valid but flagged as quick-turn double day
+    }
     if (d.a.dest.id === d.b.dest.id) s += 5;
     d.score = s;
   });
@@ -810,14 +896,13 @@ function renderPlans(dateStr, effectiveRules) {
     return;
   }
   const latestArr = parseTimeHHMM(effectiveRules.latest_arrival, new Date(dateStr + 'T00:00:00'));
-  const doubles = rankDoubles(findDoubles(candidates, latestArr));
+  const doubles = rankDoubles(findDoubles(candidates, latestArr, effectiveRules));
   let html = '';
   // Show top doubles first (cap at 8 for readability)
   const topDoubles = doubles.slice(0, 8);
   if (topDoubles.length > 0) {
     html += '<div style="font-size:13px;color:var(--muted);margin-bottom:6px;">Double-trip combinations</div>';
     topDoubles.forEach((d, idx) => {
-      const quickTurn = d.turnaroundMin < 60;
       const featured = idx === 0 ? ' featured' : '';
       html += '<div class="plan-item' + featured + '">';
       html += '<div class="plan-leg"><b>' + d.a.dest.name + '</b> <small>(' + d.a.kind + ')</small> ' +
@@ -825,9 +910,9 @@ function renderPlans(dateStr, effectiveRules) {
       html += '<div class="plan-arrow">&rarr;</div>';
       html += '<div class="plan-leg"><b>' + d.b.dest.name + '</b> <small>(' + d.b.kind + ')</small> ' +
               fmtTime(d.b.dep) + ' &ndash; ' + fmtTime(d.b.ret) + '</div>';
-      const meta = quickTurn
-        ? '<span class="badge badge-tight">Quick turn ' + Math.round(d.turnaroundMin) + ' min</span>'
-        : '<span class="badge badge-go">' + Math.round(d.turnaroundMin) + ' min between</span>';
+      const meta = (d.label === 'quick')
+        ? '<span class="badge badge-tight">Quick Turn Double Day · ' + Math.round(d.turnaroundMin) + ' min</span>'
+        : '<span class="badge badge-go">Normal turn · ' + Math.round(d.turnaroundMin) + ' min</span>';
       html += '<div class="plan-meta">' + meta + '</div>';
       html += '</div>';
     });
@@ -856,6 +941,13 @@ document.getElementById('tripFilter').addEventListener('change', recompute);
 document.getElementById('weatherDelay').addEventListener('change', recompute);
 document.getElementById('refreshBtn').addEventListener('click', refreshFromNoaa);
 
+['amClassic','amShort','pmClassic','pmShort'].forEach(id => {
+  document.getElementById(id).addEventListener('input', () => {
+    const date = document.getElementById('dateInput').value;
+    renderFleet(date, buildEffectiveRules());
+  });
+});
+
 document.getElementById('toggleRow').addEventListener('change', (e) => {
   const t = e.target;
   if (t.dataset.dest !== undefined) {
@@ -874,12 +966,14 @@ document.getElementById('settingsGrid').addEventListener('input', (e) => {
     recompute();
   }
 });
-['earliestDeparture','latestArrival','classicGround','shortGround'].forEach(id => {
+['earliestDeparture','latestArrival','classicGround','shortGround','normalTurn','quickTurn'].forEach(id => {
   document.getElementById(id).addEventListener('input', () => {
     SETTINGS.rules.earliest_departure = document.getElementById('earliestDeparture').value || '06:30';
     SETTINGS.rules.latest_arrival = document.getElementById('latestArrival').value || '22:00';
     SETTINGS.rules.classic_ground_hours = +document.getElementById('classicGround').value || 3;
     SETTINGS.rules.short_ground_hours = +document.getElementById('shortGround').value || 1;
+    SETTINGS.rules.normal_turnaround_min = +document.getElementById('normalTurn').value || 60;
+    SETTINGS.rules.quick_turnaround_min = +document.getElementById('quickTurn').value || 30;
     saveSettings(SETTINGS);
     recompute();
   });
@@ -890,6 +984,147 @@ document.getElementById('resetSettings').addEventListener('click', () => {
   renderSettings();
   recompute();
 });
+
+// ============================================================
+// Fleet planning panel — input AM/PM trip counts by type, output
+// a cascading "must-depart-by" schedule showing which destinations
+// drop off at each deadline.
+// ============================================================
+// Boundary between AM and PM windows: a candidate is AM if its tide
+// window opens before this hour, else PM.
+const AM_PM_BOUNDARY_HOUR = 14;
+
+function bucketCandidate(c) {
+  return c.window.start.getHours() < AM_PM_BOUNDARY_HOUR ? 'AM' : 'PM';
+}
+
+function renderFleet(dateStr, effectiveRules) {
+  const container = document.getElementById('fleet');
+  const out = document.getElementById('fleetCascades');
+  const candidates = collectTripCandidates(dateStr, effectiveRules);
+  if (candidates.length === 0) {
+    container.style.display = 'none';
+    return;
+  }
+  container.style.display = 'block';
+
+  // Group candidates into four buckets: AM-classic, AM-short, PM-classic, PM-short
+  const buckets = { 'AM-classic': [], 'AM-short': [], 'PM-classic': [], 'PM-short': [] };
+  candidates.forEach(c => {
+    buckets[bucketCandidate(c) + '-' + c.kind].push(c);
+  });
+
+  // Read user-entered trip counts
+  const counts = {
+    'AM-classic': +document.getElementById('amClassic').value || 0,
+    'AM-short':   +document.getElementById('amShort').value || 0,
+    'PM-classic': +document.getElementById('pmClassic').value || 0,
+    'PM-short':   +document.getElementById('pmShort').value || 0
+  };
+  const totalBooked = counts['AM-classic'] + counts['AM-short'] + counts['PM-classic'] + counts['PM-short'];
+
+  // Build a per-destination "pair lookup" so we can mark whether the same destination
+  // is also feasible in the matching AM/PM block (for full-day same-destination ops).
+  function pairKey(block, kind) {
+    const otherBlock = block === 'AM' ? 'PM' : 'AM';
+    return otherBlock + '-' + kind;
+  }
+  function findPairCandidate(thisBlock, kind, destId) {
+    const otherBucket = buckets[pairKey(thisBlock, kind)];
+    return otherBucket.find(c => c.dest.id === destId);
+  }
+
+  let html = '';
+  ['AM-classic', 'AM-short', 'PM-classic', 'PM-short'].forEach(key => {
+    const n = counts[key];
+    if (n === 0) return;
+    const [block, kind] = key.split('-');
+    const opts = buckets[key];
+    const otherBlock = block === 'AM' ? 'PM' : 'AM';
+    html += '<div class="cascade-block">';
+    html += '<h4>' + block + ' ' + kind + ' &mdash; ' + n + ' plane' + (n===1?'':'s') + ' (all to one destination)</h4>';
+    if (opts.length === 0) {
+      html += '<div class="cascade-warn">⚠ No ' + block + ' ' + kind + ' destinations are feasible today. ' +
+              'Check availability toggles, weather delay, and tide windows.</div>';
+    } else {
+      // Sort by latest_must_depart ascending
+      opts.sort((a, b) => a.latestDep - b.latestDep);
+      html += '<table class="cascade-table">';
+      html += '<thead><tr>' +
+              '<th>Destination</th>' +
+              '<th>Earliest dep</th>' +
+              '<th>Must leave by</th>' +
+              '<th>Flex</th>' +
+              '<th>Same-dest ' + otherBlock + ' (bear-day)?</th>' +
+              '</tr></thead><tbody>';
+      opts.forEach((o, i) => {
+        const flexMin = Math.round((o.latestDep - o.dep) / 60000);
+        const flexLabel = flexMin <= 0 ? 'fixed' : (flexMin >= 60 ? Math.floor(flexMin/60) + 'h ' + (flexMin%60) + 'm' : flexMin + 'm');
+        const lastRow = (i === opts.length - 1);
+        const pair = findPairCandidate(block, kind, o.dest.id);
+        const pairCell = pair
+          ? '<span class="badge badge-go">YES</span> ' + otherBlock + ' dep by <b>' + fmtTime(pair.latestDep) + '</b>'
+          : '<span style="color:var(--muted);">no ' + otherBlock + ' window</span>';
+        html += '<tr>' +
+                '<td><b>' + o.dest.name + '</b></td>' +
+                '<td>' + fmtTime(o.dep) + '</td>' +
+                '<td class="time-cell">' + fmtTime(o.latestDep) + (lastRow ? ' <small style="color:var(--danger);font-weight:600;">(LATEST)</small>' : '') + '</td>' +
+                '<td>' + flexLabel + '</td>' +
+                '<td>' + pairCell + '</td>' +
+                '</tr>';
+      });
+      html += '</tbody></table>';
+      // Switch-destination summary line
+      const earliestDecision = fmtTime(opts[0].latestDep);
+      const latestDecision = fmtTime(opts[opts.length-1].latestDep);
+      const latestDest = opts[opts.length-1].dest.name;
+      if (opts.length > 1) {
+        html += '<div style="font-size:12px;color:var(--muted);margin-top:8px;">' +
+                '⟶ Switch flexibility: locking in by <b>' + earliestDecision + '</b> keeps all ' + opts.length + ' options. ' +
+                'Latest possible commitment is <b>' + latestDecision + '</b> — restricts you to <b>' + latestDest + '</b>.</div>';
+      } else {
+        html += '<div style="font-size:12px;color:var(--muted);margin-top:8px;">' +
+                '⟶ Only one ' + block + ' option today. Must commit to <b>' + latestDest + '</b> by <b>' + latestDecision + '</b>.</div>';
+      }
+    }
+    html += '</div>';
+  });
+
+  // Full-day same-destination summary (top-level highlight)
+  if ((counts['AM-classic'] > 0 && counts['PM-classic'] > 0) ||
+      (counts['AM-short']   > 0 && counts['PM-short']   > 0)) {
+    const fullDayKinds = [];
+    if (counts['AM-classic'] > 0 && counts['PM-classic'] > 0) fullDayKinds.push('classic');
+    if (counts['AM-short']   > 0 && counts['PM-short']   > 0) fullDayKinds.push('short');
+    fullDayKinds.forEach(kind => {
+      const am = buckets['AM-' + kind];
+      const pm = buckets['PM-' + kind];
+      const both = am.filter(a => pm.find(p => p.dest.id === a.dest.id));
+      if (both.length === 0) return;
+      let topHtml = '<div class="cascade-block" style="background:#eaf3fa;border-color:#b6d3e8;">';
+      topHtml += '<h4>Full-day ' + kind + ' candidates (same destination AM + PM)</h4>';
+      topHtml += '<table class="cascade-table"><thead><tr>' +
+                 '<th>Destination</th><th>AM dep by</th><th>PM dep by</th>' +
+                 '</tr></thead><tbody>';
+      both.forEach(a => {
+        const p = pm.find(x => x.dest.id === a.dest.id);
+        topHtml += '<tr>' +
+                   '<td><b>' + a.dest.name + '</b></td>' +
+                   '<td class="time-cell">' + fmtTime(a.latestDep) + '</td>' +
+                   '<td class="time-cell">' + fmtTime(p.latestDep) + '</td>' +
+                   '</tr>';
+      });
+      topHtml += '</tbody></table></div>';
+      html = topHtml + html;
+    });
+  }
+
+  if (totalBooked === 0) {
+    out.innerHTML = '<div style="color:var(--muted);font-style:italic;font-size:13px;">Enter trip counts above to see must-depart times.</div>';
+  } else {
+    out.innerHTML = html;
+  }
+}
 
 function buildEffectiveRules() {
   const delay = document.getElementById('weatherDelay').value;
@@ -912,6 +1147,7 @@ function recompute() {
   const effectiveRules = buildEffectiveRules();
   renderDayBanner(date);
   renderPlans(date, effectiveRules);
+  renderFleet(date, effectiveRules);
   renderResults(date, filter, effectiveRules);
 }
 
